@@ -114,8 +114,32 @@ func CreateThanosTSDB(opts Opts) error {
 
 	rng := rand.New(rand.NewSource(now.UnixNano()))
 
+	var generators []timeseriesGenerator
+	// Note that 0-padding ensures sorted ordering
+	nameTmpl := fmt.Sprintf("test-metric-%%0%dd",
+		int(math.Ceil(math.Log10(float64(opts.TotalNumTimeSeries)))))
+	for i := 0; i < opts.NumTimeseries; i++ {
+		generators = append(
+			generators,
+			NewIncreasingTimeseriesGenerator(
+				fmt.Sprintf("test%d", i),
+				labels.Labels{
+					labels.Label{
+						Name:  "label",
+						Value: "value",
+					},
+					labels.Label{
+						Name:  "instance",
+						Value: fmt.Sprintf(nameTmpl, i+opts.TimeseriesStartIndex),
+					},
+				},
+				opts.StartTime,
+			),
+		)
+	}
+
 	for blockStart := opts.StartTime; blockStart.Before(opts.EndTime); blockStart = blockStart.Add(opts.BlockLength) {
-		if err := createBlock(opts, rng, blockStart, blockStart.Add(opts.BlockLength)); err != nil {
+		if err := createBlock(opts, generators, rng, blockStart, blockStart.Add(opts.BlockLength)); err != nil {
 			return err
 		}
 	}
@@ -123,7 +147,7 @@ func CreateThanosTSDB(opts Opts) error {
 	return nil
 }
 
-func createBlock(opts Opts, rng *rand.Rand, blockStart time.Time, blockEnd time.Time) error {
+func createBlock(opts Opts, generators []timeseriesGenerator, rng *rand.Rand, blockStart time.Time, blockEnd time.Time) error {
 	// Generate block ID.
 	blockULID, err := ulid.New(uint64(blockEnd.Unix()), rng)
 	if err != nil {
@@ -132,15 +156,15 @@ func createBlock(opts Opts, rng *rand.Rand, blockStart time.Time, blockEnd time.
 	outputDir := filepath.Join(opts.OutputDir, blockULID.String())
 
 	// Create sorted list of timeseries to write. These will not be populated with data yet.
-	series := createEmptyTimeseries(opts.NumTimeseries)
+	series := createEmptyTimeseries(generators)
 
 	// Store chunks in series & write them to disk.
-	if err := populateChunks(series, outputDir, blockStart, blockEnd, opts.SampleInterval); err != nil {
+	if err := populateChunks(generators, series, outputDir, blockStart, blockEnd, opts.SampleInterval); err != nil {
 		return errors.Wrap(err, "failed to create chunks")
 	}
 
 	// Store references to these chunks in the index.
-	if err := createIndex(series, outputDir, opts.TimeseriesStartIndex, opts.TotalNumTimeSeries); err != nil {
+	if err := createIndex(generators, series, outputDir, opts.TimeseriesStartIndex, opts.TotalNumTimeSeries); err != nil {
 		return errors.Wrap(err, "failed to create index")
 	}
 
@@ -156,12 +180,12 @@ func createBlock(opts Opts, rng *rand.Rand, blockStart time.Time, blockEnd time.
 
 // createEmptyTimeseries will return `numTimeseries` unique timeseries structs. Does not populate these timeseries with
 // data yet.
-func createEmptyTimeseries(numTimeseries int) []*timeseries {
-	series := make([]*timeseries, numTimeseries)
-	for i := 0; i < numTimeseries; i++ {
+func createEmptyTimeseries(generators []timeseriesGenerator) []*timeseries {
+	series := make([]*timeseries, len(generators))
+	for i, gen := range generators {
 		series[i] = &timeseries{
 			ID:   uint64(i),
-			Name: "test",
+			Name: gen.Name(),
 		}
 	}
 
@@ -170,7 +194,7 @@ func createEmptyTimeseries(numTimeseries int) []*timeseries {
 
 // populateChunks will populate `series` with a list of chunks for each timeseries. The chunks will span the entire
 // duration from blockStart to blockEnd. It will also write these chunks to the block's output directory.
-func populateChunks(series []*timeseries, outputDir string, blockStart time.Time, blockEnd time.Time, sampleInterval time.Duration) error {
+func populateChunks(generators []timeseriesGenerator, series []*timeseries, outputDir string, blockStart time.Time, blockEnd time.Time, sampleInterval time.Duration) error {
 	cw, err := chunks.NewWriter(filepath.Join(outputDir, "chunks"))
 	if err != nil {
 		return err
@@ -184,7 +208,7 @@ func populateChunks(series []*timeseries, outputDir string, blockStart time.Time
 	chunkLength := sampleInterval * samplesPerChunk
 
 	// Populate each series with fake metrics.
-	for _, s := range series {
+	for i, s := range series {
 		// Segment block into small chunks.
 		for chunkStart := blockStart; chunkStart.Before(blockEnd); chunkStart = chunkStart.Add(chunkLength) {
 			ch := chunkenc.NewXORChunk()
@@ -195,9 +219,8 @@ func populateChunks(series []*timeseries, outputDir string, blockStart time.Time
 
 			// Write series data for this chunk.
 			for sample := chunkStart; sample.Before(chunkStart.Add(chunkLength)); sample = sample.Add(sampleInterval) {
-				// Write a random value at this time. Time must be specified in ms.
-				// TODO: Give wider control of the values written. We do not always want random timeseries.
-				app.Append(sample.Unix()*1000, float64(time.Now().UnixNano()))
+				t := sample.Unix() * 1000
+				app.Append(t, generators[i].Value(t))
 			}
 
 			// Calcuate size of this chunk. This is the amount of bytes written plus the chunk overhead. See
@@ -240,54 +263,42 @@ func populateChunks(series []*timeseries, outputDir string, blockStart time.Time
 }
 
 // createIndex will write the index file. It should reference the chunks previously created.
-func createIndex(series []*timeseries, outputDir string, seriesStartIndex int, totalSeries int) error {
-	// Note that 0-padding ensures sorted ordering
-	nameTmpl := fmt.Sprintf("test-metric-%%0%dd",
-		int(math.Ceil(math.Log10(float64(totalSeries)))))
-	values := make([]string, len(series))
-	labelset := make([]labels.Labels, len(series))
+func createIndex(generators []timeseriesGenerator, series []*timeseries, outputDir string, seriesStartIndex int, totalSeries int) error {
 	iw, err := index.NewWriter(filepath.Join(outputDir, "index"))
 	if err != nil {
 		return err
 	}
 
-	// Populate label values for instance
-	for i := range series {
-		values[i] = fmt.Sprintf(nameTmpl, i+seriesStartIndex)
+	var labelValues = make(map[string][]string)
+	for _, gen := range generators {
+		for _, l := range gen.Labels() {
+			labelValues[l.Name] = append(labelValues[l.Name], l.Value)
+		}
 	}
 
 	// Add the symbol table from all symbols we use.
-	if err := iw.AddSymbols(getSymbols(values)); err != nil {
+	if err := iw.AddSymbols(getSymbols(labelValues)); err != nil {
 		return err
 	}
 
 	// Add chunk references.
 	for i, s := range series {
-		labelset[i] = labels.Labels{
-			{Name: "__name__", Value: s.Name},
-			{Name: "instance", Value: values[i]},
-			{Name: "job", Value: "testdata"},
-		}
-		if err := iw.AddSeries(s.ID, labelset[i], s.Chunks...); err != nil {
+		if err := iw.AddSeries(s.ID, generators[i].Labels(), s.Chunks...); err != nil {
 			return errors.Wrapf(err, "failed to write timeseries for %s", s.Name)
 		}
 	}
 
 	// Add mapping of label names to label values that we use.
-	if err := iw.WriteLabelIndex([]string{"__name__"}, []string{"test"}); err != nil {
-		return err
-	}
-	if err := iw.WriteLabelIndex([]string{"instance"}, values); err != nil {
-		return err
-	}
-	if err := iw.WriteLabelIndex([]string{"job"}, []string{"testdata"}); err != nil {
-		return err
+	for name, values := range labelValues {
+		if err := iw.WriteLabelIndex([]string{name}, values); err != nil {
+			return err
+		}
 	}
 
 	// Create & populate postings.
 	postings := index.NewMemPostings()
 	for i, s := range series {
-		postings.Add(s.ID, labelset[i])
+		postings.Add(s.ID, generators[i].Labels())
 	}
 
 	// Add references to index for each label name/value pair.
@@ -306,17 +317,14 @@ func createIndex(series []*timeseries, outputDir string, seriesStartIndex int, t
 }
 
 // getSymbols returns a set of symbols that we use in all timeseries labels & values.
-func getSymbols(values []string) map[string]struct{} {
-	symbols := map[string]struct{}{
-		"__name__": {},
-		"instance": {},
-		"job":      {},
-		"test":     {},
-		"testdata": {},
-	}
+func getSymbols(labelValues map[string][]string) map[string]struct{} {
+	symbols := map[string]struct{}{}
 
-	for _, v := range values {
-		symbols[v] = struct{}{}
+	for n, values := range labelValues {
+		symbols[n] = struct{}{}
+		for _, v := range values {
+			symbols[v] = struct{}{}
+		}
 	}
 
 	return symbols
