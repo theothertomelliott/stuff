@@ -46,15 +46,6 @@ const (
 		"sources": [
 			"%s"
 		]
-	},
-	"thanos": {
-		"labels": {
-			"replica": "42",
-			"monitor": "test"
-		},
-		"downsample": {
-			"resolution": 0
-		}
 	}
 }`
 )
