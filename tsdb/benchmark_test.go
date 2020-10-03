@@ -2,7 +2,10 @@ package tsdb_test
 
 import (
 	"fmt"
+	"io/ioutil"
+	"log"
 	"math"
+	"os"
 	"testing"
 	"time"
 
@@ -20,8 +23,11 @@ func BenchmarkOneHourOfData(b *testing.B) {
 	timeSeries := 3
 
 	for i := 0; i < b.N; i++ {
-		// TODO: Clean up
-		dataDir := fmt.Sprintf("testdata/data-%v", i)
+		dataDir, err := ioutil.TempDir("testdata", "onehourbench")
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer os.RemoveAll(dataDir)
 
 		var generators []tsdb.TimeseriesGenerator
 		// Note that 0-padding ensures sorted ordering
@@ -43,14 +49,13 @@ func BenchmarkOneHourOfData(b *testing.B) {
 			)
 		}
 
-		err := tsdb.CreateThanosTSDB(tsdb.Opts{
-			OutputDir:          dataDir,
-			Timeseries:         generators,
-			TotalNumTimeSeries: totalSeries,
-			StartTime:          startTime,
-			EndTime:            endTime,
-			SampleInterval:     time.Minute,
-			BlockLength:        2 * time.Hour,
+		err = tsdb.CreateThanosTSDB(tsdb.Opts{
+			OutputDir:      dataDir,
+			Timeseries:     generators,
+			StartTime:      startTime,
+			EndTime:        endTime,
+			SampleInterval: time.Minute,
+			BlockLength:    2 * time.Hour,
 		})
 		if err != nil {
 			b.Fatal(err)
