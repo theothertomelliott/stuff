@@ -60,13 +60,12 @@ const (
 )
 
 type Opts struct {
-	OutputDir          string                // The directory to place the generated TSDB blocks. Default /tmp/tsdb.
-	Timeseries         []TimeseriesGenerator // Generators defining each time series to be created.
-	TotalNumTimeSeries int                   // The total number of timeseries to generate using multiple invocations. Default NumTimeseries.
-	StartTime          time.Time             // Metrics will be produced from this time. Default now.
-	EndTime            time.Time             // Metrics will be produced until this time. Default 1 week.
-	SampleInterval     time.Duration         // How often to sample the metrics. Default 15s.
-	BlockLength        time.Duration         // The length of time each block will cover. Default 2 hours.
+	OutputDir      string                // The directory to place the generated TSDB blocks. Default /tmp/tsdb.
+	Timeseries     []TimeseriesGenerator // Generators defining each time series to be created.
+	StartTime      time.Time             // Metrics will be produced from this time. Default now.
+	EndTime        time.Time             // Metrics will be produced until this time. Default 1 week.
+	SampleInterval time.Duration         // How often to sample the metrics. Default 15s.
+	BlockLength    time.Duration         // The length of time each block will cover. Default 2 hours.
 }
 
 type timeseries struct {
@@ -78,10 +77,6 @@ type timeseries struct {
 func CreateThanosTSDB(opts Opts) error {
 	if opts.OutputDir == "" {
 		opts.OutputDir = "/tmp/tsdb"
-	}
-
-	if opts.TotalNumTimeSeries == 0 {
-		opts.TotalNumTimeSeries = len(opts.Timeseries)
 	}
 
 	now := time.Now()
@@ -133,7 +128,7 @@ func createBlock(opts Opts, rng *rand.Rand, blockStart time.Time, blockEnd time.
 	}
 
 	// Store references to these chunks in the index.
-	if err := createIndex(opts.Timeseries, series, outputDir, opts.TotalNumTimeSeries); err != nil {
+	if err := createIndex(opts.Timeseries, series, outputDir); err != nil {
 		return errors.Wrap(err, "failed to create index")
 	}
 
@@ -232,7 +227,7 @@ func populateChunks(generators []TimeseriesGenerator, series []*timeseries, outp
 }
 
 // createIndex will write the index file. It should reference the chunks previously created.
-func createIndex(generators []TimeseriesGenerator, series []*timeseries, outputDir string, totalSeries int) error {
+func createIndex(generators []TimeseriesGenerator, series []*timeseries, outputDir string) error {
 	iw, err := index.NewWriter(filepath.Join(outputDir, "index"))
 	if err != nil {
 		return err
