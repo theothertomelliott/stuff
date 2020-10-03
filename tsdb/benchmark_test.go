@@ -22,35 +22,40 @@ func BenchmarkOneHourOfData(b *testing.B) {
 	timeSeriesStartIndex := 0
 	timeSeries := 3
 
+	var generators []tsdb.TimeseriesGenerator
+	// Note that 0-padding ensures sorted ordering
+	nameTmpl := fmt.Sprintf("test-metric-%%0%dd",
+		int(math.Ceil(math.Log10(float64(totalSeries)))))
+	for i := 0; i < timeSeries; i++ {
+		generators = append(
+			generators,
+			tsdb.NewIncreasingTimeseriesGenerator(
+				fmt.Sprintf("test%d", i),
+				labels.Labels{
+					labels.Label{
+						Name:  "instance",
+						Value: fmt.Sprintf(nameTmpl, i+timeSeriesStartIndex),
+					},
+				},
+				startTime,
+			),
+		)
+	}
+
+	var dataDir []string
 	for i := 0; i < b.N; i++ {
-		dataDir, err := ioutil.TempDir("testdata", "onehourbench")
+		d, err := ioutil.TempDir("testdata", fmt.Sprintf("onehourbench-%d-", i))
 		if err != nil {
 			log.Fatal(err)
 		}
-		defer os.RemoveAll(dataDir)
+		dataDir = append(dataDir, d)
+		defer os.RemoveAll(d)
+	}
 
-		var generators []tsdb.TimeseriesGenerator
-		// Note that 0-padding ensures sorted ordering
-		nameTmpl := fmt.Sprintf("test-metric-%%0%dd",
-			int(math.Ceil(math.Log10(float64(totalSeries)))))
-		for i := 0; i < timeSeries; i++ {
-			generators = append(
-				generators,
-				tsdb.NewIncreasingTimeseriesGenerator(
-					fmt.Sprintf("test%d", i),
-					labels.Labels{
-						labels.Label{
-							Name:  "instance",
-							Value: fmt.Sprintf(nameTmpl, i+timeSeriesStartIndex),
-						},
-					},
-					startTime,
-				),
-			)
-		}
-
-		err = tsdb.CreateThanosTSDB(tsdb.Opts{
-			OutputDir:      dataDir,
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		err := tsdb.CreateThanosTSDB(tsdb.Opts{
+			OutputDir:      dataDir[i],
 			Timeseries:     generators,
 			StartTime:      startTime,
 			EndTime:        endTime,
