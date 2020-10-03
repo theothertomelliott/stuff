@@ -6,20 +6,14 @@ import (
 	"github.com/prometheus/tsdb/labels"
 )
 
-// timeseriesGenerator creates samples for a time series
-type timeseriesGenerator interface {
+// TimeseriesGenerator creates samples for a time series
+type TimeseriesGenerator interface {
 	Name() string
 	Labels() labels.Labels
 	Value(t int64) float64
 }
 
-type increasingTimeseriesGenerator struct {
-	startTime time.Time
-	name      string
-	labels    labels.Labels
-}
-
-func NewIncreasingTimeseriesGenerator(name string, l labels.Labels, start time.Time) timeseriesGenerator {
+func NewIncreasingTimeseriesGenerator(name string, l labels.Labels, start time.Time) TimeseriesGenerator {
 	labelsWithName := append(l, labels.Label{
 		Name:  "__name__",
 		Value: name,
@@ -29,6 +23,12 @@ func NewIncreasingTimeseriesGenerator(name string, l labels.Labels, start time.T
 		startTime: start,
 		labels:    labelsWithName,
 	}
+}
+
+type increasingTimeseriesGenerator struct {
+	startTime time.Time
+	name      string
+	labels    labels.Labels
 }
 
 func (i *increasingTimeseriesGenerator) Name() string {

@@ -2,10 +2,13 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"log"
+	"math"
 	"time"
 
 	"github.com/jjneely/stuff/tsdb"
+	"github.com/prometheus/tsdb/labels"
 )
 
 var (
@@ -32,15 +35,40 @@ func main() {
 	flag.Parse()
 
 	endTime := time.Now().Add(-*timeShift)
+	startTime := endTime.Add(-*duration)
+	totalSeries := *totalTimeSeries
+	if totalSeries == 0 {
+		totalSeries = *timeSeries
+	}
+
+	var generators []tsdb.TimeseriesGenerator
+	// Note that 0-padding ensures sorted ordering
+	nameTmpl := fmt.Sprintf("test-metric-%%0%dd",
+		int(math.Ceil(math.Log10(float64(totalSeries)))))
+	for i := 0; i < *timeSeries; i++ {
+		generators = append(
+			generators,
+			tsdb.NewIncreasingTimeseriesGenerator(
+				fmt.Sprintf("test%d", i),
+				labels.Labels{
+					labels.Label{
+						Name:  "instance",
+						Value: fmt.Sprintf(nameTmpl, i+*timeSeriesStartIndex),
+					},
+				},
+				startTime,
+			),
+		)
+	}
+
 	err := tsdb.CreateThanosTSDB(tsdb.Opts{
-		OutputDir:            *outDir,
-		NumTimeseries:        *timeSeries,
-		TotalNumTimeSeries:   *totalTimeSeries,
-		TimeseriesStartIndex: *timeSeriesStartIndex,
-		StartTime:            endTime.Add(-*duration),
-		EndTime:              endTime,
-		SampleInterval:       *sampleInterval,
-		BlockLength:          *blockLength,
+		OutputDir:          *outDir,
+		Timeseries:         generators,
+		TotalNumTimeSeries: totalSeries,
+		StartTime:          startTime,
+		EndTime:            endTime,
+		SampleInterval:     *sampleInterval,
+		BlockLength:        *blockLength,
 	})
 
 	if err != nil {

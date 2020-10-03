@@ -3,7 +3,6 @@ package tsdb
 import (
 	"fmt"
 	"io/ioutil"
-	"math"
 	"math/rand"
 	"path/filepath"
 	"time"
@@ -13,7 +12,6 @@ import (
 	"github.com/prometheus/tsdb/chunkenc"
 	"github.com/prometheus/tsdb/chunks"
 	"github.com/prometheus/tsdb/index"
-	"github.com/prometheus/tsdb/labels"
 )
 
 const (
@@ -62,14 +60,13 @@ const (
 )
 
 type Opts struct {
-	OutputDir            string        // The directory to place the generated TSDB blocks. Default /tmp/tsdb.
-	NumTimeseries        int           // The number of timeseries to generate. Default 1.
-	TotalNumTimeSeries   int           // The total number of timeseries to generate using multiple invocations. Default NumTimeseries.
-	TimeseriesStartIndex int           // The start index of timeseries instance names. Default 0
-	StartTime            time.Time     // Metrics will be produced from this time. Default now.
-	EndTime              time.Time     // Metrics will be produced until this time. Default 1 week.
-	SampleInterval       time.Duration // How often to sample the metrics. Default 15s.
-	BlockLength          time.Duration // The length of time each block will cover. Default 2 hours.
+	OutputDir          string                // The directory to place the generated TSDB blocks. Default /tmp/tsdb.
+	Timeseries         []TimeseriesGenerator // Generators defining each time series to be created.
+	TotalNumTimeSeries int                   // The total number of timeseries to generate using multiple invocations. Default NumTimeseries.
+	StartTime          time.Time             // Metrics will be produced from this time. Default now.
+	EndTime            time.Time             // Metrics will be produced until this time. Default 1 week.
+	SampleInterval     time.Duration         // How often to sample the metrics. Default 15s.
+	BlockLength        time.Duration         // The length of time each block will cover. Default 2 hours.
 }
 
 type timeseries struct {
@@ -83,12 +80,8 @@ func CreateThanosTSDB(opts Opts) error {
 		opts.OutputDir = "/tmp/tsdb"
 	}
 
-	if opts.NumTimeseries == 0 {
-		opts.NumTimeseries = 1
-	}
-
 	if opts.TotalNumTimeSeries == 0 {
-		opts.TotalNumTimeSeries = opts.NumTimeseries
+		opts.TotalNumTimeSeries = len(opts.Timeseries)
 	}
 
 	now := time.Now()
@@ -114,32 +107,8 @@ func CreateThanosTSDB(opts Opts) error {
 
 	rng := rand.New(rand.NewSource(now.UnixNano()))
 
-	var generators []timeseriesGenerator
-	// Note that 0-padding ensures sorted ordering
-	nameTmpl := fmt.Sprintf("test-metric-%%0%dd",
-		int(math.Ceil(math.Log10(float64(opts.TotalNumTimeSeries)))))
-	for i := 0; i < opts.NumTimeseries; i++ {
-		generators = append(
-			generators,
-			NewIncreasingTimeseriesGenerator(
-				fmt.Sprintf("test%d", i),
-				labels.Labels{
-					labels.Label{
-						Name:  "label",
-						Value: "value",
-					},
-					labels.Label{
-						Name:  "instance",
-						Value: fmt.Sprintf(nameTmpl, i+opts.TimeseriesStartIndex),
-					},
-				},
-				opts.StartTime,
-			),
-		)
-	}
-
 	for blockStart := opts.StartTime; blockStart.Before(opts.EndTime); blockStart = blockStart.Add(opts.BlockLength) {
-		if err := createBlock(opts, generators, rng, blockStart, blockStart.Add(opts.BlockLength)); err != nil {
+		if err := createBlock(opts, rng, blockStart, blockStart.Add(opts.BlockLength)); err != nil {
 			return err
 		}
 	}
@@ -147,7 +116,7 @@ func CreateThanosTSDB(opts Opts) error {
 	return nil
 }
 
-func createBlock(opts Opts, generators []timeseriesGenerator, rng *rand.Rand, blockStart time.Time, blockEnd time.Time) error {
+func createBlock(opts Opts, rng *rand.Rand, blockStart time.Time, blockEnd time.Time) error {
 	// Generate block ID.
 	blockULID, err := ulid.New(uint64(blockEnd.Unix()), rng)
 	if err != nil {
@@ -156,21 +125,21 @@ func createBlock(opts Opts, generators []timeseriesGenerator, rng *rand.Rand, bl
 	outputDir := filepath.Join(opts.OutputDir, blockULID.String())
 
 	// Create sorted list of timeseries to write. These will not be populated with data yet.
-	series := createEmptyTimeseries(generators)
+	series := createEmptyTimeseries(opts.Timeseries)
 
 	// Store chunks in series & write them to disk.
-	if err := populateChunks(generators, series, outputDir, blockStart, blockEnd, opts.SampleInterval); err != nil {
+	if err := populateChunks(opts.Timeseries, series, outputDir, blockStart, blockEnd, opts.SampleInterval); err != nil {
 		return errors.Wrap(err, "failed to create chunks")
 	}
 
 	// Store references to these chunks in the index.
-	if err := createIndex(generators, series, outputDir, opts.TimeseriesStartIndex, opts.TotalNumTimeSeries); err != nil {
+	if err := createIndex(opts.Timeseries, series, outputDir, opts.TotalNumTimeSeries); err != nil {
 		return errors.Wrap(err, "failed to create index")
 	}
 
 	// Add thanos metadata for this block.
-	numChunks := int64(opts.NumTimeseries) * (blockEnd.Sub(blockStart).Nanoseconds() / (opts.SampleInterval * samplesPerChunk).Nanoseconds())
-	thanosMeta := fmt.Sprintf(blockMetaTemplate, blockULID, blockStart.Unix()*1000, blockEnd.Unix()*1000, numChunks*samplesPerChunk, opts.NumTimeseries, numChunks, blockULID)
+	numChunks := int64(len(opts.Timeseries)) * (blockEnd.Sub(blockStart).Nanoseconds() / (opts.SampleInterval * samplesPerChunk).Nanoseconds())
+	thanosMeta := fmt.Sprintf(blockMetaTemplate, blockULID, blockStart.Unix()*1000, blockEnd.Unix()*1000, numChunks*samplesPerChunk, len(opts.Timeseries), numChunks, blockULID)
 	if err := ioutil.WriteFile(filepath.Join(outputDir, "meta.json"), []byte(thanosMeta), 0755); err != nil {
 		return errors.Wrap(err, "failed to write thanos metadata")
 	}
@@ -180,7 +149,7 @@ func createBlock(opts Opts, generators []timeseriesGenerator, rng *rand.Rand, bl
 
 // createEmptyTimeseries will return `numTimeseries` unique timeseries structs. Does not populate these timeseries with
 // data yet.
-func createEmptyTimeseries(generators []timeseriesGenerator) []*timeseries {
+func createEmptyTimeseries(generators []TimeseriesGenerator) []*timeseries {
 	series := make([]*timeseries, len(generators))
 	for i, gen := range generators {
 		series[i] = &timeseries{
@@ -194,7 +163,7 @@ func createEmptyTimeseries(generators []timeseriesGenerator) []*timeseries {
 
 // populateChunks will populate `series` with a list of chunks for each timeseries. The chunks will span the entire
 // duration from blockStart to blockEnd. It will also write these chunks to the block's output directory.
-func populateChunks(generators []timeseriesGenerator, series []*timeseries, outputDir string, blockStart time.Time, blockEnd time.Time, sampleInterval time.Duration) error {
+func populateChunks(generators []TimeseriesGenerator, series []*timeseries, outputDir string, blockStart time.Time, blockEnd time.Time, sampleInterval time.Duration) error {
 	cw, err := chunks.NewWriter(filepath.Join(outputDir, "chunks"))
 	if err != nil {
 		return err
@@ -263,7 +232,7 @@ func populateChunks(generators []timeseriesGenerator, series []*timeseries, outp
 }
 
 // createIndex will write the index file. It should reference the chunks previously created.
-func createIndex(generators []timeseriesGenerator, series []*timeseries, outputDir string, seriesStartIndex int, totalSeries int) error {
+func createIndex(generators []TimeseriesGenerator, series []*timeseries, outputDir string, totalSeries int) error {
 	iw, err := index.NewWriter(filepath.Join(outputDir, "index"))
 	if err != nil {
 		return err
