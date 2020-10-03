@@ -123,11 +123,11 @@ func createBlock(opts Opts, rng *rand.Rand, blockStart time.Time, blockEnd time.
 		return errors.Wrap(err, "failed to create index")
 	}
 
-	// Add thanos metadata for this block.
+	// Add  metadata for this block.
 	numChunks := int64(len(opts.Timeseries)) * (blockEnd.Sub(blockStart).Nanoseconds() / (opts.SampleInterval * samplesPerChunk).Nanoseconds())
-	thanosMeta := fmt.Sprintf(blockMetaTemplate, blockULID, blockStart.Unix()*1000, blockEnd.Unix()*1000, numChunks*samplesPerChunk, len(opts.Timeseries), numChunks, blockULID)
-	if err := ioutil.WriteFile(filepath.Join(outputDir, "meta.json"), []byte(thanosMeta), 0755); err != nil {
-		return errors.Wrap(err, "failed to write thanos metadata")
+	meta := fmt.Sprintf(blockMetaTemplate, blockULID, blockStart.Unix()*1000, blockEnd.Unix()*1000, numChunks*samplesPerChunk, len(opts.Timeseries), numChunks, blockULID)
+	if err := ioutil.WriteFile(filepath.Join(outputDir, "meta.json"), []byte(meta), 0755); err != nil {
+		return errors.Wrap(err, "failed to write metadata")
 	}
 
 	return nil
